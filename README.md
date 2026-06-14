@@ -133,12 +133,15 @@ Le calcul s'enchaîne ainsi :
    3. **finir au plus tôt** — compacter le temps.
 
    Cette logique produit des **navettes bidirectionnelles** (beaucoup moins de
-   km à vide) et des **postes mieux remplis** (moins de véhicules). On insère
-   prise de poste, **pause**, **désinfection** à chaque transition sale →
-   propre, et fin de poste ; la **durée d'un poste est réelle** (pas de
-   comblement artificiel). Une **tolérance de fenêtre** réglable (quelques
-   minutes) permet aux navettes très serrées (trajet ≈ largeur de fenêtre,
-   typiquement le bio HGRL) de s'enchaîner sur un même véhicule.
+   km à vide) et des **postes mieux remplis** (moins de véhicules). **Chaque
+   poste dure exactement une vacation** (7h30) : le début est calé sur la
+   première tournée (06:00 pour les véhicules qui enchaînent deux vacations,
+   flottant pour les charges tardives), et le temps non travaillé est comblé en
+   *inoccupé*. Le **taux d'occupation utile** mesure donc honnêtement la part
+   réellement travaillée d'un poste de 7h30. On insère prise de poste,
+   **pause**, **désinfection** à chaque transition sale → propre, et fin de
+   poste. Une **tolérance de fenêtre** réglable permet aux navettes très serrées
+   (trajet ≈ largeur de fenêtre, typiquement le bio HGRL) de s'enchaîner.
 7. **Contrôle du seuil d'occupation (blocage dur)** : après résolution, le
    moteur calcule le **taux d'occupation utile** de chaque poste
    = (conduite + manutention + mise à quai) / durée du poste. Pour les **types

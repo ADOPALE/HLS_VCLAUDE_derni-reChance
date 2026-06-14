@@ -160,6 +160,30 @@ def test_histogramme_par_contenant():
     assert len(fig.data) > 0  # au moins une série (un type de contenant)
 
 
+def test_duree_poste_fixe():
+    if not os.path.exists(EXEMPLE):
+        return
+    params = cfg.SimulationParams()
+    ds, _ = pipeline.charger_dataset(EXEMPLE, params)
+    params.vehicules_autorises = [v for v in ds.vehicules if v != "SEMI-REMORQUE"]
+    res = pipeline.resoudre_jour(ds, "Lundi", params)
+    # tous les postes durent exactement une vacation
+    for p in res["postes"]:
+        assert (p.fin - p.debut) == params.duree_vacation_min
+
+
+def test_libelle_flux():
+    if not os.path.exists(EXEMPLE):
+        return
+    from optiflux.outputs import libelle_flux
+    params = cfg.SimulationParams()
+    ds, _ = pipeline.charger_dataset(EXEMPLE, params)
+    f = ds.flux[0]
+    lib = libelle_flux(f)
+    assert f.site_depart in lib and f.site_arrivee in lib
+    assert "_" in lib
+
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

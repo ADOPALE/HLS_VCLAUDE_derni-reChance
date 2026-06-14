@@ -65,6 +65,19 @@ def _flux_index(ds):
     return {f.id: f for f in ds.flux}
 
 
+def libelle_flux(f) -> str:
+    """Identifiant lisible : FONCTION_Origine_Destination_id (ex. BLANCHISSERIE_HSJ_HLS_0353)."""
+    if f is None:
+        return ""
+    fonction = (f.fonction_support or "FLUX").strip().upper().replace(" ", "-")
+    num = f.id[1:] if f.id and f.id[0] in "Ff" else f.id
+    return f"{fonction}_{f.site_depart}_{f.site_arrivee}_{num}"
+
+
+def _libelle_depuis_id(fid: str, fidx: dict) -> str:
+    return libelle_flux(fidx.get(fid)) if fidx.get(fid) else fid
+
+
 def generer_classeur(resultats: dict[str, dict], ds, params: cfg.SimulationParams) -> bytes:
     """Construit le classeur et le retourne sous forme d'octets (xlsx)."""
     wb = Workbook()
@@ -115,7 +128,8 @@ def generer_classeur(resultats: dict[str, dict], ds, params: cfg.SimulationParam
                     "À bord après": op.nb_apres,
                     "Distance (km)": round(op.distance, 2),
                     "À plein": "oui" if op.a_plein else "",
-                    "Flux": ",".join(sorted(set(op.flux_ids))),
+                    "Flux": ", ".join(_libelle_depuis_id(fid, fidx)
+                                      for fid in sorted(set(op.flux_ids))),
                 })
     cols_t = ["Jour", "Poste", "Véhicule", "Opération", "De", "Vers", "Début", "Fin",
               "Durée (min)", "Contenants +", "Contenants -", "À bord après",
@@ -147,6 +161,9 @@ def generer_classeur(resultats: dict[str, dict], ds, params: cfg.SimulationParam
         lq, _ = construire_planning_quais(r["postes"], ds.sites, params)
         for row in lq:
             row = {"Jour": jour, **{k: v for k, v in row.items() if not k.startswith("_")}}
+            if row.get("Flux"):
+                row["Flux"] = ", ".join(_libelle_depuis_id(i.strip(), fidx)
+                                        for i in str(row["Flux"]).split(",") if i.strip())
             lignes_q.append(row)
     _ecrire_table(ws, lignes_q,
                   ["Jour", "Site", "Arrivée", "Début mise à quai", "Fin opération",
@@ -168,14 +185,15 @@ def generer_classeur(resultats: dict[str, dict], ds, params: cfg.SimulationParam
             if not f:
                 continue
             lignes_ft.append({
-                "Jour": jour, "Flux": fid, "Fonction": f.fonction_support,
+                "Jour": jour, "Flux": libelle_flux(f), "ID": fid,
+                "Fonction": f.fonction_support,
                 "Départ": f.site_depart, "Destination": f.site_arrivee,
                 "Contenant": f.contenant, "Quantité": f.quantite(jour),
                 "Sale/propre": "sale" if f.sale else "propre",
                 "Véhicule(s)": ", ".join(sorted(vehs)),
             })
     _ecrire_table(ws, lignes_ft,
-                  ["Jour", "Flux", "Fonction", "Départ", "Destination", "Contenant",
+                  ["Jour", "Flux", "ID", "Fonction", "Départ", "Destination", "Contenant",
                    "Quantité", "Sale/propre", "Véhicule(s)"])
 
     # -------------------------------------------------------- 7. Flux non servis
@@ -183,10 +201,12 @@ def generer_classeur(resultats: dict[str, dict], ds, params: cfg.SimulationParam
     lignes_ns = []
     for jour, r in resultats.items():
         for n in r.get("non_servis", []):
-            lignes_ns.append({"Jour": jour, "Flux": ", ".join(n.get("flux_ids", [])),
+            lignes_ns.append({"Jour": jour,
+                              "Flux": ", ".join(_libelle_depuis_id(i, fidx)
+                                                for i in n.get("flux_ids", [])),
                               "Type": "Non servi", "Raison": n.get("raison", "")})
         for inc in r.get("incompatibles", []):
-            lignes_ns.append({"Jour": jour, "Flux": inc.get("flux_id", ""),
+            lignes_ns.append({"Jour": jour, "Flux": _libelle_depuis_id(inc.get("flux_id", ""), fidx),
                               "Type": "Incompatible (préalable)",
                               "Raison": inc.get("raison", "") + " | " + inc.get("suggestion", "")})
     if not lignes_ns:

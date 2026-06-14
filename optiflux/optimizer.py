@@ -186,8 +186,10 @@ def _servir_chargement(poste: PosteSolution, ch: Chargement, veh: Vehicule,
 
     ordre_c, ordre_l, pos_fin = _sequencer_sites(pos, ch.sites_collecte, ch.sites_livraison, duree)
 
-    # respecter le début au plus tôt (attente si arrivée avant hmin)
-    debut_min = ch.debut_au_plus_tot
+    # respecter le début au plus tôt (attente si arrivée avant hmin) ;
+    # tolérance : on peut collecter jusqu'à `tolerance_fenetre_min` en avance,
+    # ce qui permet aux tournées serrées de boucler dans leur créneau.
+    debut_min = ch.debut_au_plus_tot - params.tolerance_fenetre_min
 
     charge_surf = poste_charge_courante(poste)
     charge_poids = 0.0
@@ -338,22 +340,41 @@ def optimiser_jour(jour: str, chargements: list[Chargement], vehicules: dict[str
         plafonnée à l'heure de fin maxi) : un poste démarré à 06:45 peut donc
         terminer une tournée jusqu'à ~14:15, ce qui évite la 'faille' entre vacations.
         """
+    def construire_post(vtype: str, instance: str, slot_debut: int, slot_fin: int,
+                        debut_impose: int | None = None):
+        """Construit un poste de durée FIXE (= une vacation) pour ce véhicule.
+
+        - `debut_impose` non nul : début calé (2e vacation chaînée) ;
+        - sinon début flottant, calé sur le 1er chargement servable (≥ slot_debut)
+          afin d'éviter l'attente initiale tout en gardant une durée constante.
+
+        Le poste dure exactement `duree_vacation_min` : le temps non travaillé est
+        comblé en 'inoccupé'. Retourne (poste|None) et retire les chargements servis.
+        """
         veh = vehicules[vtype]
         depot = veh.stationnement_initial or "HSJ"
-        borne_debut = max(slot_debut, earliest)
 
-        # pré-scan : caler le début du poste sur le 1er chargement réellement servable
         candidats0 = [c for c in unassigned if c.vehicule_type == vtype]
         if not candidats0:
             return None
-        debuts = []
-        for c in candidats0:
-            trajet = _duree(duree, params, depot, first_pickup(c))
-            d = max(borne_debut, (c.debut_au_plus_tot or borne_debut) - params.prise_poste_min - int(trajet))
-            debuts.append(d)
-        debut = min(debuts) if debuts else borne_debut
-        debut = max(borne_debut, min(debut, slot_fin - 30))
-        limite = min(debut + params.duree_vacation_min, params.heure_fin_max_min)
+
+        if debut_impose is not None:
+            debut = debut_impose
+        else:
+            # début flottant : au plus tôt servable, borné par le créneau
+            debuts = []
+            for c in candidats0:
+                trajet = _duree(duree, params, depot, first_pickup(c))
+                d = max(slot_debut, (c.debut_au_plus_tot or slot_debut)
+                        - params.prise_poste_min - int(trajet))
+                debuts.append(d)
+            debut = min(debuts) if debuts else slot_debut
+            # ne pas démarrer si tard que le poste dépasserait l'heure de fin maxi
+            debut = min(debut, params.heure_fin_max_min - params.duree_vacation_min)
+            debut = max(debut, slot_debut)
+        fin_vacation = min(debut + params.duree_vacation_min, params.heure_fin_max_min)
+        # retour dépôt strictement dans la vacation -> durée de poste EXACTE
+        limite_retour = fin_vacation
 
         p = PosteSolution(id=f"{jour[:3]}-P{len(postes)+1:03d}", jour=jour,
                           vehicule_type=vtype, vehicule_instance=instance,
@@ -365,8 +386,7 @@ def optimiser_jour(jour: str, chargements: list[Chargement], vehicules: dict[str
         servis: list[Chargement] = []
         last_pickup = None
         while True:
-            # pause éventuelle (avant de chercher le prochain chargement)
-            _pause_dans_post(p, debut, limite, params, duree, dist)
+            _pause_dans_post(p, debut, fin_vacation, params, duree, dist)
             meilleur = None
             meilleur_cle = None
             for ch in unassigned:
@@ -376,13 +396,12 @@ def optimiser_jour(jour: str, chargements: list[Chargement], vehicules: dict[str
                 if not ok:
                     continue
                 retour = _duree(duree, params, pos, depot)
-                if fin + retour + params.fin_poste_min > limite:
+                if fin + retour + params.fin_poste_min > limite_retour:
                     continue
                 pk = ch.sites_collecte[0] if ch.sites_collecte else depot
                 deadhead = _duree(duree, params, p.position, pk)
-                backhaul = deadhead <= 1e-6            # charger là où l'on vient de livrer
+                backhaul = deadhead <= 1e-6
                 meme_navette = (last_pickup is not None and pk == last_pickup)
-                # hiérarchie : 1) backhaul, 2) poursuite de la navette, 3) finir tôt
                 cle = (0 if backhaul else 1,
                        0 if meme_navette else 1,
                        fin, deadhead, -ch.nb_contenants)
@@ -407,10 +426,14 @@ def optimiser_jour(jour: str, chargements: list[Chargement], vehicules: dict[str
         if not servis:
             return None
         if p.pause_debut is None:
-            _pause_dans_post(p, debut, limite, params, duree, dist)
+            _pause_dans_post(p, debut, fin_vacation, params, duree, dist)
             if p.pause_debut is None:
                 _forcer_pause(p, params)
         cloturer_poste(p, duree, dist, params)
+        # durée FIXE : comblement 'inoccupé' jusqu'à la fin exacte de la vacation
+        if p.fin < fin_vacation:
+            p.operations.append(Operation("inoccupe", depot, depot, int(p.fin), int(fin_vacation)))
+        p.fin = fin_vacation
         _calculer_metriques(p, params)
         if p.nb_chargements:
             p.rempl_surf_pct = p._rempl_surf_sum / p.nb_chargements
@@ -457,13 +480,28 @@ def optimiser_jour(jour: str, chargements: list[Chargement], vehicules: dict[str
         compteur_instances[vtype] = compteur_instances.get(vtype, 0) + 1
         instance = f"{vtype} #{compteur_instances[vtype]}"
         a_servi = False
-        dispo = 0  # heure à laquelle le véhicule redevient disponible
-        for (slot_debut, slot_fin) in creneaux:
-            p = construire_post(vtype, instance, slot_debut, slot_fin, earliest=dispo)
-            if p is not None:
-                postes.append(p)
-                a_servi = True
-                dispo = p.fin
+        slot0 = creneaux[0]
+        # 1re vacation : démarrage calé à l'heure mini (favorise le chaînage)
+        p1 = construire_post(vtype, instance, slot0[0], slot0[1], debut_impose=slot0[0])
+        if p1 is None:
+            # rien de servable dès l'heure mini -> poste à début flottant (charges tardives)
+            p1 = construire_post(vtype, instance, slot0[0], slot0[1])
+        if p1 is not None:
+            postes.append(p1)
+            a_servi = True
+            # vacations chaînées seulement si la 1re a démarré à l'heure mini
+            prec_fin = p1.fin
+            if p1.debut <= slot0[0]:
+                for _ in range(1, params.nb_vacations_max):
+                    if prec_fin + params.duree_vacation_min > params.heure_fin_max_min:
+                        break
+                    pk = construire_post(vtype, instance, prec_fin,
+                                         prec_fin + params.duree_vacation_min,
+                                         debut_impose=prec_fin)
+                    if pk is None:
+                        break
+                    postes.append(pk)
+                    prec_fin = pk.fin
         if not a_servi:
             # ce véhicule n'a rien pu servir : la graine est infaisable seule
             compteur_instances[vtype] -= 1
