@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import data_loader, data_cleaning, validators, preprocessing, fleet_generator
+from . import data_loader, data_cleaning, validators, preprocessing, fleet_generator, optimizer
 from . import config as cfg
 from .models import Site, Vehicule, Contenant, Flux
 
@@ -59,9 +59,12 @@ def resoudre_jour(ds: Dataset, jour: str, params: cfg.SimulationParams) -> dict:
     postes, non_servis, chargements = fleet_generator.optimiser(
         jour, unites, veh_sel, ds.sites, ds.contenants, ds.duree, ds.dist, params)
 
+    seuil = optimizer.evaluer_seuil_occupation(postes, params)
+
     return {"jour": jour, "incompatibles": [], "postes": postes,
             "non_servis": non_servis, "chargements": chargements,
-            "unites": unites, "ok": len(non_servis) == 0}
+            "unites": unites, "seuil_occupation": seuil,
+            "ok": len(non_servis) == 0 and seuil["acceptable"]}
 
 
 def resoudre(ds: Dataset, params: cfg.SimulationParams) -> dict[str, dict]:

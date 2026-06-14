@@ -116,25 +116,46 @@ Le calcul s'enchaîne ainsi :
    surfacique réglable**. Cet oracle est appelé **avant toute combinaison** de
    flux pour garantir que les flux combinés tiennent réellement.
 5. **Construction des chargements** (`route_builder`) : les unités pleines
-   forment un chargement chacune ; les **reliquats** sont regroupés par logique
-   **look-forward** (même origine et/ou destination, fenêtres conciliables) dans
-   le plus petit véhicule compatible — en revérifiant la compatibilité
-   (mixité, propre/sale, exclusions) et le bin-packing.
-6. **Optimisation** (`optimizer`) : affectation des chargements à des **postes**
-   (1 poste = 1 véhicule + 1 chauffeur, durée = vacation). On insère prise de
-   poste, **pause** (au dépôt, dans une fenêtre de 2 h centrée), **désinfection**
-   à chaque transition sale → propre, et fin de poste. Les fenêtres horaires de
-   collecte/livraison sont respectées. Un même véhicule peut enchaîner **deux
-   postes** (deux chauffeurs) : la réutilisation est calculée par coloration
-   d'intervalles.
-7. **Plannings & exports** (`driver_scheduler`, `dock_scheduler`, `outputs`,
-   `visualization`).
+   forment un chargement chacune ; les **reliquats** d'un **même corridor**
+   (même origine ET même destination) avec une **fenêtre commune suffisante**
+   sont consolidés dans le plus petit véhicule compatible — en revérifiant la
+   compatibilité (mixité, propre/sale, exclusions) et le bin-packing. Les flux
+   de corridors différents ne sont **pas** fusionnés de force : ils sont
+   enchaînés par le véhicule à l'étape suivante (évite les chargements
+   multi-arrêts à fenêtre nulle).
+6. **Optimisation — affectation PAR VÉHICULE** (`optimizer`) : on ouvre un
+   véhicule et on le **remplit** sur ses **vacations chaînées** (par défaut 2 :
+   06:00→13:30 puis 13:30→21:00, deux chauffeurs successifs) **avant** d'en
+   ouvrir un autre. À chaque étape, le moteur choisit le prochain chargement
+   selon une **hiérarchie** :
+   1. **backhaul** — charger là où l'on vient de livrer (retour chargé) ;
+   2. **poursuite de la navette** — rester sur la même origine ;
+   3. **finir au plus tôt** — compacter le temps.
+
+   Cette logique produit des **navettes bidirectionnelles** (beaucoup moins de
+   km à vide) et des **postes mieux remplis** (moins de véhicules). On insère
+   prise de poste, **pause**, **désinfection** à chaque transition sale →
+   propre, et fin de poste ; la **durée d'un poste est réelle** (pas de
+   comblement artificiel). Une **tolérance de fenêtre** réglable (quelques
+   minutes) permet aux navettes très serrées (trajet ≈ largeur de fenêtre,
+   typiquement le bio HGRL) de s'enchaîner sur un même véhicule.
+7. **Contrôle du seuil d'occupation (blocage dur)** : après résolution, le
+   moteur calcule le **taux d'occupation utile** de chaque poste
+   = (conduite + manutention + mise à quai) / durée du poste. Pour les **types
+   de véhicules soumis au seuil** (tous sauf, par défaut, `VL FRIGO BIO` et
+   `FOURGON`, dont les postes sont naturellement courts), si un poste est
+   **sous le seuil réglable**, la solution est déclarée **NON acceptable** :
+   les postes fautifs sont listés dans l'interface et dans l'onglet *Contrôles*.
+8. **Plannings & exports** (`driver_scheduler`, `dock_scheduler`, `outputs`,
+   `visualization`), avec **KPI de remplissage** (surface au sol et poids) par
+   poste et en moyenne.
 
 ### Hiérarchie d'optimisation appliquée
 Par construction et par tri, le moteur vise dans l'ordre :
-respect des contraintes obligatoires → 100 % des flux servis → minimisation des
-véhicules puis des postes → réduction des désinfections → réduction des
-kilomètres et des temps morts.
+respect des contraintes obligatoires → 100 % des flux servis → seuil
+d'occupation respecté → minimisation des véhicules (remplissage par véhicule +
+vacations chaînées) → navettes bidirectionnelles (moins de km à vide) →
+réduction des désinfections et des temps morts.
 
 ---
 

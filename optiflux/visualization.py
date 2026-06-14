@@ -28,6 +28,34 @@ _COULEURS_OP = {
 }
 
 
+def histogramme_flux_par_contenant(ds, jours: list[str]) -> go.Figure:
+    """Contenants par TYPE de contenant et par jour (barres empilées).
+
+    C'est le distingo par type de contenant demandé pour la visualisation de la
+    charge : on voit la part de chaque nature de contenant (armoires, rolls,
+    caisses, etc.) dans le volume journalier."""
+    data = defaultdict(lambda: defaultdict(int))
+    for f in ds.flux:
+        for j in jours:
+            q = f.quantite(j)
+            if q:
+                data[j][f.contenant or "(non précisé)"] += q
+    # tri des contenants par volume total décroissant (légende lisible)
+    totaux = defaultdict(int)
+    for j in data:
+        for c, v in data[j].items():
+            totaux[c] += v
+    contenants = [c for c, _ in sorted(totaux.items(), key=lambda x: -x[1])]
+    fig = go.Figure()
+    for c in contenants:
+        fig.add_bar(name=c, x=jours, y=[data[j].get(c, 0) for j in jours])
+    fig.update_layout(barmode="stack",
+                      title="Charge par type de contenant et par jour",
+                      xaxis_title="Jour", yaxis_title="Nombre de contenants",
+                      legend_title="Type de contenant", height=460)
+    return fig
+
+
 def histogramme_flux_par_fonction(ds, jours: list[str]) -> go.Figure:
     """Contenants par fonction support et par jour (barres empilées)."""
     data = defaultdict(lambda: defaultdict(int))

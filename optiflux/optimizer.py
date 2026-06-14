@@ -76,6 +76,62 @@ class PosteSolution:
     t_quai: float = 0.0
     t_attente: float = 0.0
     t_desinfection: float = 0.0
+    # taux de remplissage moyen des chargements du poste (surface au sol / poids)
+    rempl_surf_pct: float = 0.0
+    rempl_poids_pct: float = 0.0
+    _rempl_surf_sum: float = 0.0
+    _rempl_poids_sum: float = 0.0
+
+
+def _remplissage_chargement(ch, veh: Vehicule, contenants_global: dict | None):
+    """Taux de remplissage d'un chargement : (surface au sol %, poids %)."""
+    if not contenants_global:
+        return 0.0, 0.0
+    surf = 0.0
+    poids = 0.0
+    for u in ch.unites:
+        c = contenants_global.get(u.contenant)
+        n = getattr(u, "nb_contenants", 1) or 1
+        if c is not None:
+            surf += c.surface_m2 * n
+        pu = getattr(u, "poids_t", 0.0) or 0.0
+        if pu:
+            poids += pu
+        elif c is not None:
+            poids += (c.poids_plein_t if not getattr(u, "vide", False) else c.poids_vide_t) * n
+    surf_pct = 100.0 * surf / veh.surface_m2 if veh.surface_m2 else 0.0
+    poids_pct = 100.0 * poids / veh.poids_max_t if veh.poids_max_t else 0.0
+    return min(surf_pct, 100.0), min(poids_pct, 100.0)
+
+
+def occupation_utile_pct(p: PosteSolution) -> float:
+    """Taux d'occupation utile = (conduite + manutention + mise à quai) / durée du poste."""
+    d = p.fin - p.debut
+    if d <= 0:
+        return 0.0
+    return 100.0 * (p.t_conduite + p.t_manutention + p.t_quai) / d
+
+
+def evaluer_seuil_occupation(postes: list[PosteSolution], params: cfg.SimulationParams) -> dict:
+    """Contrôle le seuil d'occupation (blocage dur) sur les types soumis au seuil.
+
+    Retourne {'seuil', 'acceptable', 'violations':[...], 'types_controles'}.
+    Si au moins un poste contrôlé est sous le seuil -> solution NON acceptable.
+    """
+    seuil = params.seuil_occupation_min_pct
+    violations = []
+    types_controles = sorted({p.vehicule_type for p in postes
+                              if params.soumis_au_seuil(p.vehicule_type)})
+    for p in postes:
+        if not params.soumis_au_seuil(p.vehicule_type):
+            continue
+        occ = occupation_utile_pct(p)
+        if occ + 1e-6 < seuil:
+            violations.append({"poste": p.id, "vehicule": p.vehicule_instance,
+                               "type": p.vehicule_type, "occupation_pct": round(occ, 1),
+                               "manque_pts": round(seuil - occ, 1)})
+    return {"seuil": seuil, "acceptable": len(violations) == 0,
+            "violations": violations, "types_controles": types_controles}
 
 
 def _duree(duree, params, o, d):
@@ -185,7 +241,7 @@ def _servir_chargement(poste: PosteSolution, ch: Chargement, veh: Vehicule,
         t += manut
 
     # contrôle fenêtre de livraison
-    if t > ch.fin_au_plus_tard and not _tournee_derogation(ch):
+    if t > ch.fin_au_plus_tard + params.tolerance_fenetre_min and not _tournee_derogation(ch):
         return False, [], poste.fin, poste.position, poste.etat_sanitaire_courant
 
     nouvel_etat = "sale" if ch.sale else etat
@@ -203,7 +259,7 @@ def poste_charge_courante(poste: PosteSolution) -> float:
 
 
 def cloturer_poste(poste: PosteSolution, duree, dist, params: cfg.SimulationParams):
-    """Retour dépôt + fin de poste, puis comblement jusqu'à la durée exacte."""
+    """Retour dépôt + fin de poste. Pas de comblement : la durée du poste est réelle."""
     t = poste.fin
     pos = poste.position
     if pos != poste.depot:
@@ -212,30 +268,21 @@ def cloturer_poste(poste: PosteSolution, duree, dist, params: cfg.SimulationPara
                                           distance=_dist(dist, pos, poste.depot), a_plein=False))
         t += dd
         pos = poste.depot
-    # fin de poste
     poste.operations.append(Operation("fin_poste", poste.depot, poste.depot, int(t),
                                       int(t + params.fin_poste_min)))
     t += params.fin_poste_min
-    # comblement (temps inoccupé à la base) jusqu'à la durée exacte de vacation
-    fin_theorique = poste.debut + params.duree_vacation_min
-    if t < fin_theorique:
-        poste.operations.append(Operation("inoccupe", poste.depot, poste.depot,
-                                          int(t), int(fin_theorique)))
-        t = fin_theorique
     poste.fin = int(t)
     poste.position = pos
 
 
-def _inserer_pause_si_due(poste: PosteSolution, params: cfg.SimulationParams,
-                          duree, dist):
-    """Insère la pause au dépôt dans la fenêtre 2h centrée sur le milieu du poste."""
+def _pause_dans_post(poste: PosteSolution, slot_debut: int, slot_fin: int,
+                     params: cfg.SimulationParams, duree, dist) -> bool:
+    """Insère la pause si on a dépassé le milieu du créneau et qu'elle n'est pas posée."""
     if poste.pause_debut is not None:
-        return
-    milieu = poste.debut + params.duree_vacation_min // 2
-    fenetre_bas = milieu - params.fenetre_pause_min // 2
-    fenetre_haut = milieu + params.fenetre_pause_min // 2
-    if poste.fin < fenetre_bas:
-        return
+        return False
+    milieu = (slot_debut + slot_fin) // 2
+    if poste.fin < milieu:
+        return False
     t = poste.fin
     pos = poste.position
     if pos != poste.depot:
@@ -244,159 +291,190 @@ def _inserer_pause_si_due(poste: PosteSolution, params: cfg.SimulationParams,
                                           distance=_dist(dist, pos, poste.depot)))
         t += dd
         pos = poste.depot
-    debut_pause = max(t, fenetre_bas)
-    debut_pause = min(debut_pause, fenetre_haut)
-    if debut_pause > t:
-        poste.operations.append(Operation("attente", poste.depot, poste.depot, int(t), int(debut_pause)))
     poste.operations.append(Operation("pause", poste.depot, poste.depot,
-                                      int(debut_pause), int(debut_pause + params.duree_pause_min)))
-    poste.pause_debut = int(debut_pause)
-    poste.fin = int(debut_pause + params.duree_pause_min)
+                                      int(t), int(t + params.duree_pause_min)))
+    poste.pause_debut = int(t)
+    poste.fin = int(t + params.duree_pause_min)
     poste.position = poste.depot
+    return True
 
 
 def optimiser_jour(jour: str, chargements: list[Chargement], vehicules: dict[str, Vehicule],
                    sites: dict[str, Site], duree, dist, params: cfg.SimulationParams,
                    contenants_global: dict | None = None):
     """
-    Affecte les chargements à des postes. Retourne (postes, non_servis).
-    Si un chargement groupé est infaisable, il est re-découpé en unités
-    individuelles (chacune ayant passé la faisabilité unitaire) -> 100 % servi.
-    """
-    from collections import deque
-    from .route_builder import Chargement as _Ch, _finaliser
+    Affectation PAR VÉHICULE (et non plus par chargement) :
 
-    file = deque(sorted(chargements, key=lambda c: (c.debut_au_plus_tot, -c.nb_contenants)))
+    - on ouvre un véhicule et on le REMPLIT sur ses créneaux de vacation
+      (jusqu'à `nb_vacations_max`, p.ex. 06:00–13:30 puis 13:30–21:00) ;
+    - à chaque étape on choisit le chargement faisable le PLUS PROCHE de la
+      position courante : un retour chargé situé là où l'on vient de livrer est
+      donc préféré -> les navettes deviennent bidirectionnelles (moins de km à
+      vide) ;
+    - on n'ouvre un nouveau véhicule que lorsqu'aucun chargement ne peut plus
+      s'ajouter -> moins de véhicules, postes mieux remplis.
+
+    Retourne (postes, non_servis).
+    """
+    from .route_builder import Chargement as _Ch, _finaliser, _plus_petit_vehicule_compatible
+
+    creneaux = params.creneaux_vacation()
     postes: list[PosteSolution] = []
     non_servis: list[dict] = []
     compteur_instances: dict[str, int] = {}
+    unassigned: list[Chargement] = [c for c in chargements]
 
-    def nouveau_poste(vtype: str, debut: int) -> PosteSolution:
-        compteur_instances[vtype] = compteur_instances.get(vtype, 0) + 1
-        inst = f"{vtype} #{compteur_instances[vtype]}"  # provisoire (réaffecté ensuite)
+    def first_pickup(ch: Chargement) -> str:
+        return ch.sites_collecte[0] if ch.sites_collecte else (
+            vehicules[ch.vehicule_type].stationnement_initial if ch.vehicule_type in vehicules else "HSJ")
+
+    def construire_post(vtype: str, instance: str, slot_debut: int, slot_fin: int,
+                        earliest: int = 0):
+        """Construit un poste pour ce véhicule sur ce créneau ; sert le plus de
+        chargements possible. Retourne (poste|None). Retire les chargements servis.
+
+        `earliest` impose le début (chaînage : la 2e vacation commence après la 1re).
+        La fin admissible est relative au chauffeur (début + durée de vacation,
+        plafonnée à l'heure de fin maxi) : un poste démarré à 06:45 peut donc
+        terminer une tournée jusqu'à ~14:15, ce qui évite la 'faille' entre vacations.
+        """
         veh = vehicules[vtype]
-        p = PosteSolution(
-            id=f"{jour[:3]}-P{len(postes)+1:03d}",
-            jour=jour, vehicule_type=vtype, vehicule_instance=inst,
-            depot=veh.stationnement_initial or "HSJ",
-            debut=debut, fin=debut, position=veh.stationnement_initial or "HSJ",
-        )
-        p.operations.append(Operation("prise_poste", p.depot, p.depot,
+        depot = veh.stationnement_initial or "HSJ"
+        borne_debut = max(slot_debut, earliest)
+
+        # pré-scan : caler le début du poste sur le 1er chargement réellement servable
+        candidats0 = [c for c in unassigned if c.vehicule_type == vtype]
+        if not candidats0:
+            return None
+        debuts = []
+        for c in candidats0:
+            trajet = _duree(duree, params, depot, first_pickup(c))
+            d = max(borne_debut, (c.debut_au_plus_tot or borne_debut) - params.prise_poste_min - int(trajet))
+            debuts.append(d)
+        debut = min(debuts) if debuts else borne_debut
+        debut = max(borne_debut, min(debut, slot_fin - 30))
+        limite = min(debut + params.duree_vacation_min, params.heure_fin_max_min)
+
+        p = PosteSolution(id=f"{jour[:3]}-P{len(postes)+1:03d}", jour=jour,
+                          vehicule_type=vtype, vehicule_instance=instance,
+                          depot=depot, debut=debut, fin=debut, position=depot)
+        p.operations.append(Operation("prise_poste", depot, depot,
                                       int(debut), int(debut + params.prise_poste_min)))
         p.fin = debut + params.prise_poste_min
-        return p
 
-    def decomposer(ch: Chargement):
-        """Re-crée un chargement par unité, sur le véhicule le plus petit compatible."""
-        from .route_builder import _plus_petit_vehicule_compatible
-        out = []
-        for u in ch.unites:
-            v = _plus_petit_vehicule_compatible([u], vehicules, sites, contenants_global, params)
-            if v is None:
-                non_servis.append({"flux_ids": [u.flux_id], "raison": "Aucun véhicule compatible"})
-                continue
-            c = _Ch(unites=[u], vehicule_type=v.type_nom)
-            out.append(_finaliser(c, contenants_global))
-        return out
-
-    while file:
-        ch = file.popleft()
-        if not ch.vehicule_type or ch.vehicule_type not in vehicules:
-            if len(ch.unites) > 1:
-                file.extendleft(reversed(decomposer(ch)))
-            else:
-                non_servis.append({"flux_ids": [u.flux_id for u in ch.unites],
-                                   "raison": "Aucun véhicule compatible"})
-            continue
-        veh = vehicules[ch.vehicule_type]
-        plafond = params.max_par_type.get(ch.vehicule_type)
-
-        candidats = [p for p in postes if p.vehicule_type == ch.vehicule_type]
-        candidats.sort(key=lambda p: p.fin)
-        place = False
-        for p in candidats:
-            _inserer_pause_si_due(p, params, duree, dist)
-            ok, ops, fin, pos, etat = _servir_chargement(p, ch, veh, sites, duree, dist, params)
-            if not ok:
-                continue
-            retour = _duree(duree, params, pos, p.depot)
-            if fin + retour + params.fin_poste_min > p.debut + params.duree_vacation_min:
-                continue
+        servis: list[Chargement] = []
+        last_pickup = None
+        while True:
+            # pause éventuelle (avant de chercher le prochain chargement)
+            _pause_dans_post(p, debut, limite, params, duree, dist)
+            meilleur = None
+            meilleur_cle = None
+            for ch in unassigned:
+                if ch.vehicule_type != vtype:
+                    continue
+                ok, ops, fin, pos, etat = _servir_chargement(p, ch, veh, sites, duree, dist, params)
+                if not ok:
+                    continue
+                retour = _duree(duree, params, pos, depot)
+                if fin + retour + params.fin_poste_min > limite:
+                    continue
+                pk = ch.sites_collecte[0] if ch.sites_collecte else depot
+                deadhead = _duree(duree, params, p.position, pk)
+                backhaul = deadhead <= 1e-6            # charger là où l'on vient de livrer
+                meme_navette = (last_pickup is not None and pk == last_pickup)
+                # hiérarchie : 1) backhaul, 2) poursuite de la navette, 3) finir tôt
+                cle = (0 if backhaul else 1,
+                       0 if meme_navette else 1,
+                       fin, deadhead, -ch.nb_contenants)
+                if meilleur_cle is None or cle < meilleur_cle:
+                    meilleur_cle = cle
+                    meilleur = (ch, ops, fin, pos, etat)
+            if meilleur is None:
+                break
+            ch, ops, fin, pos, etat = meilleur
             p.operations.extend(ops)
             p.fin = fin
             p.position = pos
             p.etat_sanitaire_courant = etat
             p.nb_chargements += 1
-            place = True
-            break
-        if place:
-            continue
+            sp, pp = _remplissage_chargement(ch, veh, contenants_global)
+            p._rempl_surf_sum += sp
+            p._rempl_poids_sum += pp
+            last_pickup = ch.sites_collecte[0] if ch.sites_collecte else depot
+            servis.append(ch)
+            unassigned.remove(ch)
 
-        if plafond is not None and compteur_instances.get(ch.vehicule_type, 0) >= plafond:
-            if len(ch.unites) > 1:
-                file.extendleft(reversed(decomposer(ch)))
-            else:
-                non_servis.append({"flux_ids": [u.flux_id for u in ch.unites],
-                                   "raison": f"Plafond {ch.vehicule_type} atteint"})
-            continue
-
-        debut = _debut_nouveau_poste(ch, veh, duree, params)
-        p = nouveau_poste(ch.vehicule_type, debut)
-        ok, ops, fin, pos, etat = _servir_chargement(p, ch, veh, sites, duree, dist, params)
-        if not ok:
-            postes_compteur_rollback(compteur_instances, ch.vehicule_type)
-            if len(ch.unites) > 1:
-                file.extendleft(reversed(decomposer(ch)))
-            else:
-                non_servis.append({"flux_ids": [u.flux_id for u in ch.unites],
-                                   "raison": "Fenêtre horaire infaisable"})
-            continue
-        p.operations.extend(ops)
-        p.fin = fin
-        p.position = pos
-        p.etat_sanitaire_courant = etat
-        p.nb_chargements = 1
-        postes.append(p)
-
-    for p in postes:
-        _inserer_pause_si_due(p, params, duree, dist)
+        if not servis:
+            return None
         if p.pause_debut is None:
-            _forcer_pause(p, params)
+            _pause_dans_post(p, debut, limite, params, duree, dist)
+            if p.pause_debut is None:
+                _forcer_pause(p, params)
         cloturer_poste(p, duree, dist, params)
         _calculer_metriques(p, params)
+        if p.nb_chargements:
+            p.rempl_surf_pct = p._rempl_surf_sum / p.nb_chargements
+            p.rempl_poids_pct = p._rempl_poids_sum / p.nb_chargements
+        return p
 
-    _reaffecter_instances(postes, params)
+    def decomposer_en_place(ch: Chargement):
+        unassigned.remove(ch)
+        for u in ch.unites:
+            v = _plus_petit_vehicule_compatible([u], vehicules, sites, contenants_global, params)
+            if v is None:
+                non_servis.append({"flux_ids": [u.flux_id], "raison": "Aucun véhicule compatible"})
+                continue
+            unassigned.append(_finaliser(_Ch(unites=[u], vehicule_type=v.type_nom), contenants_global))
+
+    securite = 0
+    while unassigned:
+        securite += 1
+        if securite > 100000:
+            break
+        # graine = chargement le plus précoce non encore servi
+        seed = min(unassigned, key=lambda c: c.debut_au_plus_tot)
+        vtype = seed.vehicule_type
+        if not vtype or vtype not in vehicules:
+            if len(seed.unites) > 1:
+                decomposer_en_place(seed)
+            else:
+                unassigned.remove(seed)
+                non_servis.append({"flux_ids": [u.flux_id for u in seed.unites],
+                                   "raison": "Aucun véhicule compatible"})
+            continue
+
+        plafond = params.max_par_type.get(vtype)
+        if plafond is not None and compteur_instances.get(vtype, 0) >= plafond:
+            # plus de véhicule disponible de ce type : décomposer ou non servi
+            if len(seed.unites) > 1:
+                decomposer_en_place(seed)
+            else:
+                unassigned.remove(seed)
+                non_servis.append({"flux_ids": [u.flux_id for u in seed.unites],
+                                   "raison": f"Plafond {vtype} atteint"})
+            continue
+
+        compteur_instances[vtype] = compteur_instances.get(vtype, 0) + 1
+        instance = f"{vtype} #{compteur_instances[vtype]}"
+        a_servi = False
+        dispo = 0  # heure à laquelle le véhicule redevient disponible
+        for (slot_debut, slot_fin) in creneaux:
+            p = construire_post(vtype, instance, slot_debut, slot_fin, earliest=dispo)
+            if p is not None:
+                postes.append(p)
+                a_servi = True
+                dispo = p.fin
+        if not a_servi:
+            # ce véhicule n'a rien pu servir : la graine est infaisable seule
+            compteur_instances[vtype] -= 1
+            if len(seed.unites) > 1:
+                decomposer_en_place(seed)
+            else:
+                unassigned.remove(seed)
+                non_servis.append({"flux_ids": [u.flux_id for u in seed.unites],
+                                   "raison": "Fenêtre horaire infaisable"})
+
     return postes, non_servis
-
-
-def _reaffecter_instances(postes, params: cfg.SimulationParams, max_postes_par_vehicule: int = 2):
-    """
-    Réutilise un même véhicule pour plusieurs postes NON chevauchants
-    (coloration d'intervalles, plafonnée à max_postes_par_vehicule par véhicule).
-    Minimise le nombre de véhicules tout en respectant la limite de postes.
-    """
-    from collections import defaultdict
-    par_type = defaultdict(list)
-    for p in postes:
-        par_type[p.vehicule_type].append(p)
-
-    for vtype, plist in par_type.items():
-        plist.sort(key=lambda p: p.debut)
-        instances = []  # [{'fin', 'postes'}]
-        compteur = 0
-        for p in plist:
-            choisi = None
-            for inst in instances:
-                if inst["fin"] <= p.debut and inst["postes"] < max_postes_par_vehicule:
-                    choisi = inst
-                    break
-            if choisi is None:
-                compteur += 1
-                choisi = {"nom": f"{vtype} #{compteur}", "fin": p.fin, "postes": 0}
-                instances.append(choisi)
-            choisi["fin"] = p.fin
-            choisi["postes"] += 1
-            p.vehicule_instance = choisi["nom"]
 
 
 def _debut_nouveau_poste(ch: Chargement, veh: Vehicule, duree, params: cfg.SimulationParams) -> int:

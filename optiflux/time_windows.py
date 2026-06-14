@@ -47,6 +47,6 @@ def flux_faisable(unite: UniteTransport, veh: Vehicule, duree_trajet: float,
     Le flux est-il réalisable dans sa fenêtre ? Retourne (ok, temps_min, largeur_fenetre).
     """
     debut, fin = fenetre_disponible(unite, params)
-    largeur = fin - debut
+    largeur = fin - debut + getattr(params, "tolerance_fenetre_min", 0)
     tmin = temps_minimal_flux(unite, veh, duree_trajet, presence_quai)
     return (tmin <= largeur), tmin, largeur

@@ -102,6 +102,64 @@ def test_pipeline_exemple():
     assert len(res["postes"]) > 0
 
 
+# ---------------------------------------------------- refonte du moteur (v1.1)
+def test_creneaux_vacation():
+    p = cfg.SimulationParams()
+    cr = p.creneaux_vacation()
+    assert len(cr) == p.nb_vacations_max
+    # 1er créneau démarre à l'heure mini, créneaux contigus
+    assert cr[0][0] == p.heure_debut_mini_min
+    assert cr[1][0] == cr[0][1]
+
+
+def test_chainage_deux_vacations():
+    if not os.path.exists(EXEMPLE):
+        return
+    params = cfg.SimulationParams()
+    ds, _ = pipeline.charger_dataset(EXEMPLE, params)
+    params.vehicules_autorises = [v for v in ds.vehicules if v != "SEMI-REMORQUE"]
+    res = pipeline.resoudre_jour(ds, "Lundi", params)
+    from collections import Counter
+    c = Counter(p.vehicule_instance for p in res["postes"])
+    # au moins un véhicule enchaîne deux postes (deux vacations)
+    assert max(c.values()) == 2
+
+
+def test_seuil_occupation_evaluation():
+    if not os.path.exists(EXEMPLE):
+        return
+    params = cfg.SimulationParams()
+    ds, _ = pipeline.charger_dataset(EXEMPLE, params)
+    params.vehicules_autorises = [v for v in ds.vehicules if v != "SEMI-REMORQUE"]
+    res = pipeline.resoudre_jour(ds, "Lundi", params)
+    s = res["seuil_occupation"]
+    # le frigo bio est exclu du contrôle par défaut
+    assert "VL FRIGO BIO" not in s["types_controles"]
+    assert "acceptable" in s and "violations" in s
+
+
+def test_remplissage_calcule():
+    if not os.path.exists(EXEMPLE):
+        return
+    params = cfg.SimulationParams()
+    ds, _ = pipeline.charger_dataset(EXEMPLE, params)
+    params.vehicules_autorises = [v for v in ds.vehicules if v != "SEMI-REMORQUE"]
+    res = pipeline.resoudre_jour(ds, "Lundi", params)
+    # les gros porteurs doivent afficher un remplissage surfacique non nul
+    pl = [p for p in res["postes"] if p.vehicule_type == "PL 19T"]
+    assert pl and max(p.rempl_surf_pct for p in pl) > 20
+
+
+def test_histogramme_par_contenant():
+    if not os.path.exists(EXEMPLE):
+        return
+    from optiflux import visualization as viz
+    params = cfg.SimulationParams()
+    ds, _ = pipeline.charger_dataset(EXEMPLE, params)
+    fig = viz.histogramme_flux_par_contenant(ds, list(cfg.DAYS))
+    assert len(fig.data) > 0  # au moins une série (un type de contenant)
+
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

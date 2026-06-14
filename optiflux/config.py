@@ -62,6 +62,10 @@ class SimulationParams:
     # --- Désinfection ---
     duree_desinfection_min: int = 15
 
+    # --- Tolérance horaire (minutes de retard admissibles sur une livraison) ---
+    # Permet aux navettes très serrées (trajet ~ largeur de fenêtre) de s'enchaîner.
+    tolerance_fenetre_min: int = 5
+
     # --- Sélection ---
     jours_a_simuler: list = field(default_factory=lambda: list(DAYS))
     vehicules_autorises: list = field(default_factory=list)   # noms de types
@@ -71,6 +75,37 @@ class SimulationParams:
     # --- Solveur ---
     solver_time_limit_s: int = 30          # garde-fou de temps
     look_forward_horizon_min: int = 60     # horizon d'anticipation (regroupement)
+
+    # --- Vacations chaînées (un véhicule peut enchaîner 2 vacations) ---
+    nb_vacations_max: int = 2              # postes max par véhicule et par jour
+    # bornes des créneaux de vacation (minutes) ; 2 créneaux : matin / après-midi
+    # calculées à partir de heure_debut_mini_min et duree_vacation_min
+
+    # --- Seuil d'occupation (blocage dur) ---
+    seuil_occupation_min_pct: float = 50.0  # % de temps utile minimal par poste
+    vehicules_soumis_seuil: list = field(default_factory=list)  # vide = déduit auto
+    # types exclus du contrôle d'occupation par défaut (postes naturellement courts)
+    vehicules_exclus_seuil: list = field(
+        default_factory=lambda: ["VL FRIGO BIO", "FOURGON"])
+
+    def creneaux_vacation(self) -> list[tuple[int, int]]:
+        """Retourne les créneaux [(debut, fin), ...] des vacations chaînables."""
+        creneaux = []
+        debut = self.heure_debut_mini_min
+        for _ in range(max(1, self.nb_vacations_max)):
+            fin = debut + self.duree_vacation_min
+            if fin > self.heure_fin_max_min:
+                fin = self.heure_fin_max_min
+            creneaux.append((debut, fin))
+            debut = fin
+            if debut >= self.heure_fin_max_min:
+                break
+        return creneaux
+
+    def soumis_au_seuil(self, vtype: str) -> bool:
+        if self.vehicules_soumis_seuil:
+            return vtype in self.vehicules_soumis_seuil
+        return vtype not in self.vehicules_exclus_seuil
 
     def duree_avec_circulation(self, minutes: float) -> float:
         """Applique le facteur circulation à une durée (0 reste 0)."""

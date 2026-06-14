@@ -94,7 +94,8 @@ def generer_classeur(resultats: dict[str, dict], ds, params: cfg.SimulationParam
     cols_ch = ["Jour", "Poste", "Véhicule", "Début", "Fin", "Durée poste (min)",
                "Conduite (min)", "Manutention (min)", "Mise à quai (min)",
                "Désinfection (min)", "Attente/inoccupé (min)", "Pause (min)",
-               "Taux occupation utile %"]
+               "Nb chargements", "Taux occupation utile %",
+               "Remplissage surface %", "Remplissage poids %"]
     _ecrire_table(ws, lignes_ch, cols_ch)
 
     # ------------------------------------------------------- 3. Tournées détail
@@ -209,9 +210,23 @@ def generer_classeur(resultats: dict[str, dict], ds, params: cfg.SimulationParam
                                     "Détail": f"{p.id} : {p.fin - p.debut} min > {params.duree_vacation_min}"})
     for jour, r in resultats.items():
         lignes_ctrl.append({"Jour": jour, "Contrôle": "Flux servis",
-                            "Statut": "OK" if r.get("ok") else "ATTENTION",
+                            "Statut": "OK" if len(r.get("non_servis", [])) == 0 else "ATTENTION",
                             "Détail": f"{len(r.get('non_servis', []))} non servis, "
                                       f"{len(r.get('incompatibles', []))} incompatibles préalables"})
+        # seuil d'occupation (blocage dur)
+        s = r.get("seuil_occupation")
+        if s is not None:
+            if s["acceptable"]:
+                lignes_ctrl.append({"Jour": jour, "Contrôle": f"Seuil occupation ≥ {s['seuil']:.0f}%",
+                                    "Statut": "OK",
+                                    "Détail": f"Tous les postes contrôlés ({', '.join(s['types_controles'])}) "
+                                              f"respectent le seuil."})
+            else:
+                lignes_ctrl.append({"Jour": jour, "Contrôle": f"Seuil occupation ≥ {s['seuil']:.0f}%",
+                                    "Statut": "SOLUTION REFUSÉE",
+                                    "Détail": f"{len(s['violations'])} poste(s) sous le seuil : " +
+                                              "; ".join(f"{v['poste']} ({v['type']}) {v['occupation_pct']:.0f}%"
+                                                        for v in s["violations"][:12])})
     _ecrire_table(ws, lignes_ctrl, ["Jour", "Contrôle", "Statut", "Détail"])
 
     # ------------------------------------------------------------ 9. Indicateurs
@@ -228,6 +243,9 @@ def generer_classeur(resultats: dict[str, dict], ds, params: cfg.SimulationParam
         attente = sum(p.t_attente for p in postes)
         desinf = sum(p.t_desinfection for p in postes)
         sf = synthese_flotte(postes)
+        rs = sum(p.rempl_surf_pct for p in postes) / len(postes)
+        rp = sum(p.rempl_poids_pct for p in postes) / len(postes)
+        s = r.get("seuil_occupation", {})
         lignes_kpi.append({
             "Jour": jour,
             "Véhicules": sum(d["vehicules"] for d in sf.values()),
@@ -239,11 +257,15 @@ def generer_classeur(resultats: dict[str, dict], ds, params: cfg.SimulationParam
             "Manutention (h)": round(manut / 60, 1),
             "Désinfection (h)": round(desinf / 60, 1),
             "Attente/inoccupé (h)": round(attente / 60, 1),
+            "Remplissage surface moyen %": round(rs, 1),
+            "Remplissage poids moyen %": round(rp, 1),
+            "Solution acceptable (seuil)": "OUI" if s.get("acceptable", True) else "NON",
         })
     _ecrire_table(ws, lignes_kpi,
                   ["Jour", "Véhicules", "Postes (chauffeurs)", "Km total", "Km à vide",
                    "% km à vide", "Conduite (h)", "Manutention (h)", "Désinfection (h)",
-                   "Attente/inoccupé (h)"])
+                   "Attente/inoccupé (h)", "Remplissage surface moyen %",
+                   "Remplissage poids moyen %", "Solution acceptable (seuil)"])
 
     buf = io.BytesIO()
     wb.save(buf)

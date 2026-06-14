@@ -31,5 +31,8 @@ def ligne_chauffeur(p, params: cfg.SimulationParams) -> dict:
         "Mise à quai (min)": round(p.t_quai),
         "Désinfection (min)": round(p.t_desinfection),
         "Attente/inoccupé (min)": round(p.t_attente),
+        "Nb chargements": p.nb_chargements,
         "Taux occupation utile %": round(100 * t_utile / max(1, duree_poste), 1),
+        "Remplissage surface %": round(p.rempl_surf_pct, 1),
+        "Remplissage poids %": round(p.rempl_poids_pct, 1),
     }

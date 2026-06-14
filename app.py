@@ -103,6 +103,9 @@ tab_flux, tab_param, tab_res = st.tabs(["📊 Flux", "⚙️ Paramètres", "🚀
 with tab_flux:
     st.subheader("Volumétrie des flux")
     jours_dispo = list(cfg.DAYS)
+    st.markdown("**Charge par type de contenant**")
+    st.plotly_chart(viz.histogramme_flux_par_contenant(ds, jours_dispo), use_container_width=True)
+    st.markdown("**Charge par fonction support**")
     st.plotly_chart(viz.histogramme_flux_par_fonction(ds, jours_dispo), use_container_width=True)
     jour_site = st.selectbox("Jour pour la vue par site", jours_dispo, key="jour_site")
     st.plotly_chart(viz.histogramme_flux_par_site(ds, jour_site), use_container_width=True)
@@ -139,6 +142,26 @@ with tab_param:
     desinf = col10.number_input("Durée désinfection sale→propre (min)", 0, 60, p.duree_desinfection_min, 5)
     horizon = col11.number_input("Horizon look-forward (min)", 0, 240, p.look_forward_horizon_min, 15)
 
+    st.subheader("Vacations chaînées & navettes")
+    col12, col13 = st.columns(2)
+    nb_vac = col12.number_input("Vacations max par véhicule/jour", 1, 3, p.nb_vacations_max, 1,
+                                help="2 = un véhicule peut enchaîner deux postes (06:00→13:30 puis 13:30→21:00).")
+    tol = col13.number_input("Tolérance de fenêtre (min)", 0, 30, p.tolerance_fenetre_min, 1,
+                             help="Retard admissible sur une livraison. Permet aux navettes serrées "
+                                  "(trajet ≈ largeur de fenêtre, ex. bio HGRL) de s'enchaîner sur un même véhicule.")
+
+    st.subheader("Seuil d'occupation des postes (blocage dur)")
+    st.caption("Sous le seuil, la solution est déclarée **non acceptable**. "
+               "Le contrôle ne s'applique qu'aux types de véhicules sélectionnés.")
+    col14, col15 = st.columns([1, 2])
+    seuil = col14.slider("Seuil d'occupation utile minimal (%)", 0, 100,
+                         int(p.seuil_occupation_min_pct), 5)
+    defaut_soumis = [v for v in vehicules if v not in p.vehicules_exclus_seuil]
+    soumis = col15.multiselect("Véhicules soumis au seuil",
+                               vehicules, default=defaut_soumis,
+                               help="Les types non cochés (par défaut VL FRIGO BIO et FOURGON, "
+                                    "postes naturellement courts) sont exclus du contrôle.")
+
     if st.button("💾 Enregistrer les paramètres", type="primary"):
         p.jours_a_simuler = jours
         p.fonctions_support = fonctions
@@ -152,6 +175,10 @@ with tab_param:
         p.capacite_quai_defaut = int(cap_quai)
         p.duree_desinfection_min = int(desinf)
         p.look_forward_horizon_min = int(horizon)
+        p.nb_vacations_max = int(nb_vac)
+        p.tolerance_fenetre_min = int(tol)
+        p.seuil_occupation_min_pct = float(seuil)
+        p.vehicules_soumis_seuil = list(soumis)
         st.session_state.params = p
         st.success("Paramètres enregistrés. Rendez-vous dans l'onglet « Optimisation ».")
 
@@ -190,6 +217,39 @@ with tab_res:
             st.success("100 % des flux sélectionnés sont servis.")
         else:
             st.warning(f"{total_ns} flux non servis et {total_inc} incompatibles préalables (voir onglet 7 de l'export).")
+
+        # --- Statut du seuil d'occupation (blocage dur) ---
+        violations_jours = {j: r.get("seuil_occupation") for j, r in res.items()
+                            if r.get("seuil_occupation")}
+        refuses = {j: s for j, s in violations_jours.items() if not s["acceptable"]}
+        if violations_jours:
+            seuil_val = next(iter(violations_jours.values()))["seuil"]
+            if refuses:
+                st.error(f"🚫 Solution NON acceptable : le seuil d'occupation de "
+                         f"{seuil_val:.0f} % n'est pas atteint sur {len(refuses)} jour(s).")
+                for jour, s in refuses.items():
+                    with st.expander(f"{jour} — {len(s['violations'])} poste(s) sous le seuil "
+                                     f"(types contrôlés : {', '.join(s['types_controles'])})"):
+                        for v in s["violations"]:
+                            st.write(f"- **{v['poste']}** · {v['vehicule']} — "
+                                     f"{v['occupation_pct']:.0f} % (manque {v['manque_pts']:.0f} pts)")
+                st.caption("Ajustez le seuil, les types soumis, ou la flotte autorisée, "
+                           "puis relancez l'optimisation.")
+            else:
+                st.success(f"✅ Solution acceptable : tous les postes contrôlés atteignent "
+                           f"le seuil de {seuil_val:.0f} %.")
+
+        # --- KPI de remplissage moyen ---
+        all_postes = [pp for r in res.values() for pp in r["postes"]]
+        if all_postes:
+            rs = sum(pp.rempl_surf_pct for pp in all_postes) / len(all_postes)
+            rp = sum(pp.rempl_poids_pct for pp in all_postes) / len(all_postes)
+            km = sum(pp.km_total for pp in all_postes)
+            kmv = sum(pp.km_vide for pp in all_postes)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Remplissage surface moyen", f"{rs:.0f} %")
+            c2.metric("Remplissage poids moyen", f"{rp:.0f} %")
+            c3.metric("Km à vide", f"{100*kmv/max(1,km):.0f} %")
 
         st.subheader("Gantt des postes")
         jour_gantt = st.selectbox("Jour", list(res.keys()), key="jour_gantt")

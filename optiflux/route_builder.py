@@ -157,14 +157,19 @@ def construire_chargements(unites: list[UniteTransport], vehicules: dict[str, Ve
         ch = Chargement(unites=[u], vehicule_type=chosen.type_nom)
         chargements.append(_finaliser(ch, contenants))
 
-    # 2) reliquats : regroupement glouton look-forward
-    reliquats.sort(key=lambda u: (u.heure_min_collecte or 0, u.site_depart))
+    # 2) reliquats : consolidation SÛRE, uniquement au sein d'un même corridor
+    #    (même origine ET même destination) avec une fenêtre commune réellement
+    #    positive. Les flux de corridors différents ne sont PAS fusionnés de force
+    #    (ils seront enchaînés par le véhicule dans l'optimiseur) : cela évite les
+    #    chargements multi-arrêts à fenêtre nulle, sources de sur-flotte.
+    reliquats.sort(key=lambda u: (u.site_depart, u.site_arrivee,
+                                  u.heure_min_collecte or 0))
     utilises = [False] * len(reliquats)
+    MARGE_FENETRE = 20  # minutes minimales de fenêtre commune
     for i, u in enumerate(reliquats):
         if utilises[i]:
             continue
         groupe = [u]
-        # fenêtre commune courante du groupe
         gmin = u.heure_min_collecte or 0
         gmax = u.heure_max_livraison or 1440
         utilises[i] = True
@@ -172,21 +177,16 @@ def construire_chargements(unites: list[UniteTransport], vehicules: dict[str, Ve
             if utilises[j]:
                 continue
             cand = reliquats[j]
+            # même corridor uniquement
+            if cand.site_depart != u.site_depart or cand.site_arrivee != u.site_arrivee:
+                continue
             cmin = cand.heure_min_collecte or 0
             cmax = cand.heure_max_livraison or 1440
-            # la fenêtre commune doit rester valide (collecte <= livraison)
             new_min = max(gmin, cmin)
             new_max = min(gmax, cmax)
-            if new_min > new_max:
+            if new_max - new_min < MARGE_FENETRE:
                 continue
-            # proximité temporelle (look-forward borné)
-            if cmin - gmin > params.look_forward_horizon_min:
-                continue
-            # compatibilité avec TOUS les membres du groupe
             if any(not compatibility.unites_combinables(m, cand)[0] for m in groupe):
-                continue
-            # privilégier même origine OU même destination
-            if cand.site_depart != u.site_depart and cand.site_arrivee != u.site_arrivee:
                 continue
             test = groupe + [cand]
             veh = _plus_petit_vehicule_compatible(test, vehicules, sites, contenants, params)
