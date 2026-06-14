@@ -1,0 +1,10 @@
+# OptiFLUX — dépendances Python
+# Installez avec :  pip install -r requirements.txt
+streamlit>=1.30
+pandas>=2.0
+openpyxl>=3.1
+pydantic>=2.5
+plotly>=5.18
+# ortools n'est PAS requis : le moteur actuel est une heuristique pure Python.
+# Décommentez si vous branchez un solveur exact (voir README, section Limites).
+# ortools>=9.8
